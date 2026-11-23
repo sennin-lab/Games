@@ -1,22 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Maximize, Minimize, Volume2, VolumeX } from "lucide-react";
+import { BookOpen, Maximize, Minimize, Volume2, VolumeX } from "lucide-react";
 import {
-  advanceDialogue,
-  advanceIntro,
+  clearProgress,
   createInitialState,
+  explorationStats,
+  formatClock,
   getObjectives,
   interact,
+  isTrueEnding,
+  journalRows,
+  skipStory,
   startAttack,
   startIntro,
   startRoll,
   startShoot,
   stepGame,
+  tabletCount,
+  toggleJournal,
+  advanceDialogue,
+  advanceIntro,
+  type JournalRow,
 } from "@/game/engine";
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from "@/game/maps";
 import { renderGame } from "@/game/renderer";
 import { sfx } from "@/game/sound";
 import type { GamePhase, GameState, InputState } from "@/game/types";
 import { VirtualStick } from "@/components/VirtualStick";
+import { StoryBackdrop } from "@/components/StoryBackdrop";
 
 interface HudSnapshot {
   phase: GamePhase;
@@ -33,6 +43,9 @@ interface HudSnapshot {
     panel: number;
     totalPanels: number;
     hasMore: boolean;
+    line: number;
+    progress: number;
+    mood: "night" | "dawn" | "dark";
   } | null;
   hasRoll: boolean;
   hasBow: boolean;
@@ -41,12 +54,26 @@ interface HudSnapshot {
   bowCooldown: number;
   objectiveMain: string;
   objectiveSide: string | null;
+  /** Whole seconds of real play time. */
+  playSeconds: number;
+  exploration: { found: number; total: number; percent: number };
+  tablets: { found: number; total: number };
+  clearedAreas: { cleared: number; total: number };
+  trueEnding: boolean;
+  /** Present only while the travel journal is open. */
+  journal: JournalRow[] | null;
 }
 
 const NO_INPUT: InputState = { up: false, down: false, left: false, right: false };
 
 function readHud(state: GameState): HudSnapshot {
   const objectives = getObjectives(state);
+  const story = state.intro?.story ?? [];
+  const panel = story[state.intro?.panelIndex ?? 0];
+  const introProgress = state.intro
+    ? (state.intro.panelIndex + (state.intro.lineIndex / Math.max(1, panel?.lines.length ?? 1))) /
+      Math.max(1, story.length)
+    : 0;
   return {
     phase: state.phase,
     roomName: state.rooms[state.roomId].name,
@@ -66,6 +93,11 @@ function readHud(state: GameState): HudSnapshot {
       ? {
           speaker: state.intro.story[state.intro.panelIndex]?.speaker ?? "",
           text: state.intro.story[state.intro.panelIndex]?.lines[state.intro.lineIndex] ?? "",
+          line: state.intro.lineIndex,
+          progress: introProgress,
+          mood:
+            state.intro.story[state.intro.panelIndex]?.mood ??
+            (state.phase === "ending" ? "dawn" : "night"),
           panel: state.intro.panelIndex + 1,
           totalPanels: state.intro.story.length,
           hasMore:
@@ -80,6 +112,12 @@ function readHud(state: GameState): HudSnapshot {
     bowCooldown: Math.round((state.player.bowCooldown / 0.45) * 20) / 20,
     objectiveMain: objectives.main,
     objectiveSide: objectives.side,
+    playSeconds: Math.floor(state.playSeconds),
+    exploration: explorationStats(state),
+    tablets: tabletCount(state),
+    clearedAreas: clearProgress(state),
+    trueEnding: isTrueEnding(state),
+    journal: state.journalOpen ? journalRows(state) : null,
   };
 }
 
@@ -142,6 +180,10 @@ export function GameCanvas() {
   const [muted, setMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [canFullscreen, setCanFullscreen] = useState(false);
+  // The objective line is folded away on phones so it never covers the game picture.
+  const [goalOpen, setGoalOpen] = useState(
+    () => typeof window === "undefined" || window.innerWidth >= 640,
+  );
 
   const playSfx = useCallback((kind: Parameters<typeof sfx.play>[0]) => {
     sfx.play(kind);
@@ -190,6 +232,16 @@ export function GameCanvas() {
     syncHud();
   }, [playSfx, syncHud]);
 
+  const handleSkipStory = useCallback(() => {
+    skipStory(stateRef.current);
+    syncHud();
+  }, [syncHud]);
+
+  const handleToggleJournal = useCallback(() => {
+    toggleJournal(stateRef.current, playSfx);
+    syncHud();
+  }, [playSfx, syncHud]);
+
   const toggleMute = useCallback(() => {
     setMuted((prev) => {
       const next = !prev;
@@ -233,6 +285,10 @@ export function GameCanvas() {
         handleShoot();
         return;
       }
+      if ((key === "m" || key === "escape") && (phase === "playing")) {
+        if (key === "m" || stateRef.current.journalOpen) handleToggleJournal();
+        return;
+      }
       if (
         key === " " ||
         key === "z" ||
@@ -261,7 +317,15 @@ export function GameCanvas() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [handleAttack, handleInteract, handleStart, handleAdvanceIntro, handleRoll, handleShoot]);
+  }, [
+    handleAttack,
+    handleInteract,
+    handleStart,
+    handleAdvanceIntro,
+    handleRoll,
+    handleShoot,
+    handleToggleJournal,
+  ]);
 
   useEffect(() => {
     let rafId = 0;
@@ -335,34 +399,112 @@ export function GameCanvas() {
         </div>
       </div>
 
-      {/* Full-screen story / menu layers */}
+      {/* Full-screen story: animated backdrop, the line of text, and a skip control */}
       {(hud.phase === "intro" || hud.phase === "ending") && hud.intro && (
-        <button
-          type="button"
-          onClick={handleAdvanceIntro}
-          className="absolute inset-0 block cursor-pointer p-6 text-left"
-          style={{ background: "rgba(6, 8, 18, 0.9)" }}
-        >
-          <div className="mx-auto flex h-full max-w-2xl flex-col justify-center">
-            {hud.intro.speaker && (
-              <div className="mb-2 text-xs tracking-widest text-gold sm:text-sm">
-                {hud.intro.speaker}
+        <div className="absolute inset-0 overflow-hidden bg-black">
+          <StoryBackdrop
+            scene={hud.phase === "ending" ? "ending" : "opening"}
+            progress={hud.intro.progress}
+            mood={hud.intro.mood}
+          />
+          <div className="absolute inset-x-0 bottom-0 h-3/4 bg-gradient-to-t from-black via-black/60 to-transparent" />
+          <button
+            type="button"
+            onClick={handleAdvanceIntro}
+            aria-label="次の文章へ"
+            className="absolute inset-0 block cursor-pointer text-left"
+          >
+            <div className="mx-auto flex h-full max-w-2xl flex-col justify-end px-6 pb-12 sm:px-10 sm:pb-16">
+              {hud.intro.speaker && (
+                <div
+                  className="mb-2 text-xs tracking-[0.3em] text-gold sm:text-sm"
+                  style={{ textShadow: "0 2px 8px rgba(0,0,0,0.9)" }}
+                >
+                  {hud.intro.speaker}
+                </div>
+              )}
+              <p
+                key={`${hud.intro.panel}-${hud.intro.line}`}
+                className="text-sm leading-loose text-foreground sm:text-xl"
+                style={{
+                  animation: "introFadeIn 0.9s ease-out",
+                  textShadow: "0 2px 14px rgba(0,0,0,0.95)",
+                }}
+              >
+                {hud.intro.text}
+              </p>
+              <div className="mt-5 flex items-center justify-between text-[11px] text-primary sm:text-xs">
+                <span className="font-mono text-muted-foreground">
+                  {hud.intro.panel} / {hud.intro.totalPanels}
+                </span>
+                <span>
+                  {hud.intro.hasMore ? "▼ つぎへ" : hud.phase === "intro" ? "▼ はじまる" : "▼ おわる"}
+                </span>
               </div>
-            )}
-            <p
-              className="text-sm leading-relaxed text-foreground sm:text-lg"
-              style={{ animation: "introFadeIn 0.5s ease-out" }}
-            >
-              {hud.intro.text}
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={handleSkipStory}
+            className="pixel-panel absolute right-3 top-3 z-10 cursor-pointer rounded-sm px-2.5 py-1 text-xs text-foreground"
+          >
+            スキップ
+          </button>
+        </div>
+      )}
+
+      {/* Travel journal: progress per area and the lore stones read so far */}
+      {hud.phase === "playing" && hud.journal && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/90 p-3 sm:p-6">
+          <div className="pixel-panel flex max-h-full w-full max-w-xl flex-col gap-2 overflow-hidden p-3 sm:p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-bold text-gold sm:text-base">旅の記録</h2>
+              <span className="font-mono text-xs text-emerald">探索率 {hud.exploration.percent}%</span>
+              <button
+                type="button"
+                onClick={handleToggleJournal}
+                className="pixel-btn cursor-pointer rounded-sm bg-primary px-3 py-1 text-xs font-bold text-primary-foreground"
+              >
+                閉じる [M]
+              </button>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-sm bg-muted">
+              <div className="h-full bg-emerald" style={{ width: `${hud.exploration.percent}%` }} />
+            </div>
+            <p className="font-mono text-[11px] text-muted-foreground sm:text-xs">
+              旅の刻 {formatClock(hud.playSeconds)}　石板 {hud.tablets.found}/{hud.tablets.total}　場所{" "}
+              {hud.clearedAreas.cleared}/{hud.clearedAreas.total}
             </p>
-            <div className="mt-4 flex items-center justify-between text-[11px] text-primary sm:text-xs">
-              <span className="font-mono text-muted-foreground">
-                {hud.intro.panel} / {hud.intro.totalPanels}
-              </span>
-              <span>{hud.intro.hasMore ? "▼ つぎへ" : "▼ はじまる"}</span>
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              {hud.journal.map((row) => {
+                const counts = [
+                  row.enemies.total > 0 && `敵 ${row.enemies.done}/${row.enemies.total}`,
+                  row.chests.total > 0 && `宝 ${row.chests.done}/${row.chests.total}`,
+                  row.talks.total > 0 && `話 ${row.talks.done}/${row.talks.total}`,
+                  row.stones.total > 0 && `石 ${row.stones.done}/${row.stones.total}`,
+                ]
+                  .filter(Boolean)
+                  .join("　");
+                return (
+                  <div key={row.id} className="border-b border-border/60 py-2 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
+                      <span className={row.cleared ? "text-emerald" : "text-foreground"}>
+                        {row.cleared ? "✔ " : "・ "}
+                        {row.name}
+                      </span>
+                      <span className="font-mono text-[11px] text-muted-foreground">{counts}</span>
+                    </div>
+                    {row.readStones.map((stone) => (
+                      <p key={stone.title} className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        <span className="text-gold">「{stone.title}」</span> {stone.text}
+                      </p>
+                    ))}
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </button>
+        </div>
       )}
 
       {isOverlayPhase && (
@@ -376,7 +518,7 @@ export function GameCanvas() {
                 翠星の旅人 リオ
               </h1>
               <p className="mt-3 max-w-md text-xs leading-relaxed text-muted-foreground sm:text-sm">
-                エルディア諸島をめぐり、3つの「星のかけら」を集めて翠光の神殿に挑め。
+                エルディア諸島の全ての場所を巡り、3つの「星のかけら」で翠光の塔へ。かけらが翠光を満たすまで、一時間の旅路だ。
               </p>
               <button
                 type="button"
@@ -414,6 +556,17 @@ export function GameCanvas() {
               <p className="mt-2 font-mono text-xs text-gold sm:text-sm">
                 集めた星貨: ● {hud.coins}
               </p>
+              <p className="mt-1 font-mono text-xs text-emerald sm:text-sm">
+                探索率 {hud.exploration.percent}%　石板 {hud.tablets.found}/{hud.tablets.total}
+              </p>
+              <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                旅の刻 {formatClock(hud.playSeconds)}
+              </p>
+              {hud.trueEnding && (
+                <p className="mt-3 max-w-md text-xs leading-relaxed text-gold sm:text-sm">
+                  真の結末に到達した。十一の石板を読み、父の想いを受け継いだ。
+                </p>
+              )}
               <button
                 type="button"
                 onClick={handleStart}
@@ -428,41 +581,67 @@ export function GameCanvas() {
 
       {/* HUD floating over the game */}
       <header className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2 sm:p-3">
-        <div className="pixel-panel flex flex-col gap-1 rounded-sm px-2.5 py-2 text-xs sm:text-sm">
-          <div className="flex items-center gap-1.5" aria-label={`体力 ${hud.hp}/${hud.maxHp}`}>
-            <span className="font-mono text-[11px] text-muted-foreground sm:text-xs">HP</span>
-            {Array.from({ length: totalHearts }).map((_, i) => {
-              const hpForSlot = hud.hp - i * 2;
-              const fill = hpForSlot >= 2 ? "full" : hpForSlot === 1 ? "half" : "empty";
-              return <HeartIcon key={i} fill={fill} />;
-            })}
-            <span className="ml-1 font-mono text-[11px] sm:text-xs">
-              {hud.hp}/{hud.maxHp}
-            </span>
-          </div>
-          <div className="flex items-center gap-3">
+        <div className="pixel-panel flex max-w-[60vw] flex-col gap-0.5 rounded-sm px-2 py-1 text-xs opacity-90 sm:max-w-xs sm:px-2.5 sm:py-1.5 sm:text-sm">
+          {/* One compact row: hearts, shards, coins and play time */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5" aria-label={`体力 ${hud.hp}/${hud.maxHp}`}>
+            <div className="flex items-center gap-0.5">
+              {Array.from({ length: totalHearts }).map((_, i) => {
+                const hpForSlot = hud.hp - i * 2;
+                const fill = hpForSlot >= 2 ? "full" : hpForSlot === 1 ? "half" : "empty";
+                return <HeartIcon key={i} fill={fill} />;
+              })}
+              <span className="ml-1 font-mono text-[11px] sm:text-xs">
+                {hud.hp}/{hud.maxHp}
+              </span>
+            </div>
             <span className="font-mono text-emerald" aria-label={`星のかけら ${hud.shards}/3`}>
-              ★ {hud.shards}/3
+              ★{hud.shards}/3
             </span>
             <span className="font-mono text-gold" aria-label={`星貨 ${hud.coins}`}>
-              ● {hud.coins}
+              ●{hud.coins}
             </span>
+            {hud.phase === "playing" && (
+              <span className="font-mono text-[11px] text-muted-foreground" aria-label="旅の刻">
+                {formatClock(hud.playSeconds)}
+              </span>
+            )}
           </div>
+
+          {/* Objective: a single line that folds open and closed */}
           {hud.phase === "playing" && (
-            <div className="max-w-[15rem] border-t border-border/60 pt-1 text-[11px] leading-snug">
-              <p className="text-gold">▶ {hud.objectiveMain}</p>
-              {hud.objectiveSide && <p className="text-muted-foreground">{hud.objectiveSide}</p>}
-            </div>
+            <>
+              <button
+                type="button"
+                onClick={() => setGoalOpen((open) => !open)}
+                aria-expanded={goalOpen}
+                className="pointer-events-auto cursor-pointer truncate text-left text-[11px] leading-snug text-gold"
+              >
+                {goalOpen ? "▾" : "▸"} 目的{goalOpen ? "" : "（開く）"}
+              </button>
+              {goalOpen && (
+                <div className="border-t border-border/60 pt-0.5 text-[11px] leading-snug">
+                  <p className="text-gold">{hud.objectiveMain}</p>
+                  {hud.objectiveSide && <p className="text-muted-foreground">{hud.objectiveSide}</p>}
+                </div>
+              )}
+            </>
           )}
-          <p className="hidden text-[11px] text-muted-foreground md:block">
-            移動: WASD/矢印 剣: Space/Z 調べる: E/X/Enter 回避: Shift 矢: Q
-          </p>
         </div>
 
         <div className="flex items-center gap-2">
           <span className="pixel-panel rounded-sm px-2.5 py-1 text-xs text-foreground sm:text-sm">
             {hud.roomName}
           </span>
+          {hud.phase === "playing" && (
+            <button
+              type="button"
+              onClick={handleToggleJournal}
+              aria-label="旅の記録を開く"
+              className="pointer-events-auto pixel-panel inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-sm text-foreground"
+            >
+              <BookOpen className="h-4 w-4" />
+            </button>
+          )}
           <button
             type="button"
             onClick={toggleMute}

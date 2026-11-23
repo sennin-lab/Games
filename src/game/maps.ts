@@ -1,4 +1,12 @@
-import type { ChestState, EnemyState, NpcState, RoomId, RoomRuntime, TileType } from "./types";
+import type {
+  ChestState,
+  EnemyState,
+  NpcState,
+  RoomId,
+  RoomRuntime,
+  TabletState,
+  TileType,
+} from "./types";
 
 export const TILE_SIZE = 16;
 export const MAP_COLS = 15;
@@ -45,19 +53,36 @@ export function isSolidTile(tile: TileType): boolean {
   );
 }
 
+type EnemySpec = Omit<
+  EnemyState,
+  "moveTimer" | "hitTimer" | "knockVx" | "knockVy" | "dashTimer" | "alive"
+>;
+
 interface RoomBlueprint {
   id: RoomId;
   name: string;
   grid: string[];
   exits: RoomRuntime["exits"];
-  enemies: Omit<
-    EnemyState,
-    "moveTimer" | "hitTimer" | "knockVx" | "knockVy" | "dashTimer" | "alive"
-  >[];
+  enemies: EnemySpec[];
   chests: Omit<ChestState, "opened">[];
   npcs: NpcState[];
+  tablets: Omit<TabletState, "found">[];
 }
 
+/**
+ * World layout (every exit connects to the matching border of its neighbour):
+ *
+ *            [tower]
+ *               |up (gated)
+ *   [cave]   [lake] ─right─ [village] ─up─ [ruins] ─right─ [shrine]
+ *      up        ↑                |                             |
+ *      └─────────┘ down           right                       down
+ *                                 ↓                             ↓
+ *   [volcano]─down─[desert]─right─[tomb]        [marsh]─up─[forest]
+ *                    ↑  └─left─[forest]─right─┘
+ *
+ * (Compact notes only; see tests/reach script for the verified graph.)
+ */
 const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
   village: {
     id: "village",
@@ -67,13 +92,13 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
       "T.,...ppp...b.T",
       "T.bb..ppp..~S~T",
       "T.....ppp..~~~T",
-      "T.,...ppppppppp",
-      "T.....ppppppppp",
+      "p.,...ppppppppp",
+      "p.....ppppppppp",
       "T..b..ppp...,.T",
       "T.....ppp..bb.T",
       "T.,...ppp.....T",
       "T.bb.......,,.T",
-      "TTTTTTTTTTTTTTT",
+      "TTTTTTpppTTTTTT",
     ],
     exits: { up: "ruins", right: "forest", left: "lake", down: "cave" },
     enemies: [],
@@ -88,7 +113,7 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         lines: [
           "リオよ、よくぞ起きてくれた。北東の『翠光の神殿』の封印が乱れておる。",
           "東の『ささやきの森』、北の『星見の遺跡』、南の『氷晶の洞窟』にかけらが眠る。",
-          "かけらが2つ揃えば神殿の扉が開く。右上の泉に触れると体力が回復するぞ。",
+          "かけらが2つ揃えば神殿の扉が開く。島の全ての場所を巡れば、最後の塔への道も開けるぞ。",
         ],
         variants: [
           {
@@ -114,6 +139,15 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         ],
       },
     ],
+    tablets: [
+      {
+        id: "tab-village",
+        tx: 13,
+        ty: 9,
+        title: "始まりの村の石碑",
+        text: "星が空から降った夜、村人は皆、灯をともして祈った。翠光が戻るまで、この灯は消さない。",
+      },
+    ],
   },
   forest: {
     id: "forest",
@@ -125,21 +159,21 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
       "T..TT.ppp.TT..T",
       "ppppppppp..b..p",
       "ppppppppppp...p",
-      "T..b...p..bbb.T",
-      "T.,..~=~...b..T",
-      "T.bb.~~~..,...T",
-      "T....~~~......T",
-      "TTTTTTTTTTTTTTT",
+      "T..b..ppp.~~.bT",
+      "T.,...ppp~~~..T",
+      "T.bb..ppp.~~.,T",
+      "T.....ppp.....T",
+      "TTTTTTpppTTTTTT",
     ],
-    exits: { left: "village", up: "shrine", right: "desert" },
+    exits: { left: "village", up: "shrine", right: "desert", down: "marsh" },
     enemies: [
       { id: "f-d1", kind: "doromu", x: 10 * 16, y: 2 * 16, size: 14, hp: 2, maxHp: 2, dir: "left" },
       { id: "f-d2", kind: "doromu", x: 5 * 16, y: 7 * 16, size: 14, hp: 2, maxHp: 2, dir: "right" },
       {
         id: "f-t1",
         kind: "togemushi",
-        x: 11 * 16,
-        y: 8 * 16,
+        x: 12 * 16,
+        y: 5 * 16,
         size: 14,
         hp: 3,
         maxHp: 3,
@@ -149,7 +183,7 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
     chests: [
       {
         id: "chest-forest-shard",
-        tx: 12,
+        tx: 13,
         ty: 8,
         reward: "shard",
         message: "『星のかけら（森）』を手に入れた！淡い翠色の光を放っている。",
@@ -163,9 +197,18 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         tx: 4,
         ty: 6,
         lines: [
-          "この先の茂みの奥に星のかけらが眠る。",
-          "北の『翠光の神殿』へ進むには、星のかけらが2つ必要だ。",
+          "この森の奥には、かつて旅人が残した石板が眠っているという。",
+          "南の霧深い湿地へ続く道もあるが、迷いやすいので気をつけよ。",
         ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-forest",
+        tx: 1,
+        ty: 1,
+        title: "ささやきの森の古歌",
+        text: "森は風に語りかける。『翠の子よ、迷うな。まっすぐ光を見よ』と。",
       },
     ],
   },
@@ -247,51 +290,51 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         ],
       },
     ],
+    tablets: [
+      {
+        id: "tab-ruins",
+        tx: 12,
+        ty: 1,
+        title: "星見の遺跡の石板",
+        text: "星の巡りが三つの欠片を結ぶ。欠けた星は、いずれ同じ空の下に集う。",
+      },
+    ],
   },
   cave: {
     id: "cave",
     name: "氷晶の洞窟",
     grid: [
+      "RRRRRRpppRRRRRR",
+      "RiiiiRpppRiiiiR",
+      "R....ppppp....R",
+      "RiiiR.ppp.RiiiR",
+      "R.i.R.ppp.R.i.R",
+      "R.i...ppp...i.R",
+      "RiiR.ppppp.RiiR",
+      "R....ppp....iiR",
+      "R.iR.ppp.R.iiiR",
+      "R.ii.ppp.Ri..iR",
       "RRRRRRRRRRRRRRR",
-      "R..i..iii..i..R",
-      "R.iR..iii..Ri.R",
-      "R.i...iii...i.R",
-      "R.iRR.iii.RRi.R",
-      "R.iiiiiiiiiii.R",
-      "R.iRR.iii.RRi.R",
-      "R.i...iii...i.R",
-      "R.iR.ppppp.Ri.R",
-      "R.ii.ppppp.ii.R",
-      "RRRRRpppppRRRRR",
     ],
     exits: { up: "village" },
     enemies: [
-      { id: "c-f1", kind: "fuyubi", x: 3 * 16, y: 3 * 16, size: 14, hp: 3, maxHp: 3, dir: "right" },
-      { id: "c-f2", kind: "fuyubi", x: 11 * 16, y: 3 * 16, size: 14, hp: 3, maxHp: 3, dir: "left" },
-      {
-        id: "c-k1",
-        kind: "kagebito",
-        x: 7 * 16,
-        y: 5 * 16,
-        size: 14,
-        hp: 3,
-        maxHp: 3,
-        dir: "down",
-      },
-      { id: "c-f3", kind: "fuyubi", x: 4 * 16, y: 7 * 16, size: 14, hp: 3, maxHp: 3, dir: "up" },
+      { id: "c-f1", kind: "fuyubi", x: 3 * 16, y: 5 * 16, size: 14, hp: 3, maxHp: 3, dir: "right" },
+      { id: "c-f2", kind: "fuyubi", x: 11 * 16, y: 5 * 16, size: 14, hp: 3, maxHp: 3, dir: "left" },
+      { id: "c-k1", kind: "kagebito", x: 9 * 16, y: 7 * 16, size: 14, hp: 3, maxHp: 3, dir: "down" },
+      { id: "c-f3", kind: "fuyubi", x: 1 * 16, y: 9 * 16, size: 14, hp: 3, maxHp: 3, dir: "up" },
     ],
     chests: [
       {
         id: "chest-cave-shard",
-        tx: 7,
-        ty: 1,
+        tx: 2,
+        ty: 2,
         reward: "shard",
         message: "『星のかけら（洞窟）』を手に入れた！冷たい光が透き通る。",
       },
       {
         id: "chest-cave-coins",
-        tx: 13,
-        ty: 5,
+        tx: 12,
+        ty: 2,
         reward: "coins",
         message: "古い星貨の袋を見つけた！20星貨を手に入れた！",
       },
@@ -305,9 +348,18 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         ty: 5,
         lines: [
           "……ようこそ、翠光の勇者よ。我は氷晶の守り手。",
-          "この洞窟のかけらは、北の祭壇に眠る。氷の魔物に気をつけるのだ。",
+          "この洞窟のかけらは、氷の迷路の奥に隠されている。凍てつく魔物に気をつけるのだ。",
           "東の宝箱には古き星貨が眠っている。道中に役立てよ。",
         ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-cave",
+        tx: 10,
+        ty: 5,
+        title: "氷晶の石板",
+        text: "凍てついた水の底に、かつての翠光が眠る。割れた欠片は、いつか必ず溶ける。",
       },
     ],
   },
@@ -315,47 +367,29 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
     id: "lake",
     name: "星影の湖",
     grid: [
+      "TTTTTTGGGTTTTTT",
+      "T.,..ppp..bb,.T",
+      "T.bb.ppp.~~~..T",
+      "T,..=ppp=~~~,.T",
+      "Tpppppppppppppp",
+      "Tpppppppppppppp",
+      "T..==~~~~~==..T",
+      "T,.~~~~~~~~~..T",
+      "T.bb~~~~~~~bb.T",
+      "T.,..~~~~~..,.T",
       "TTTTTTTTTTTTTTT",
-      "T.,..~~~~~..,.T",
-      "T.bb.~~~~~.bb.T",
-      "T...=~~~~~....T",
-      "T,.==~~~~~==..T",
-      "T..===~~~===..T",
-      "T,.==~~~~~==..T",
-      "T...=~~~~~....T",
-      "T.bb.~~~~~.bb.T",
-      "T.,..~~~~~..,.T",
-      "TTTTTpppppTTTTT",
     ],
     exits: { right: "village", up: "tower" },
     enemies: [
-      {
-        id: "l-h1",
-        kind: "hibachi",
-        x: 3 * 16,
-        y: 2 * 16,
-        size: 14,
-        hp: 2,
-        maxHp: 2,
-        dir: "right",
-      },
-      {
-        id: "l-h2",
-        kind: "hibachi",
-        x: 11 * 16,
-        y: 8 * 16,
-        size: 14,
-        hp: 2,
-        maxHp: 2,
-        dir: "left",
-      },
-      { id: "l-d1", kind: "doromu", x: 7 * 16, y: 5 * 16, size: 14, hp: 2, maxHp: 2, dir: "down" },
+      { id: "l-h1", kind: "hibachi", x: 4 * 16, y: 2 * 16, size: 14, hp: 2, maxHp: 2, dir: "right" },
+      { id: "l-h2", kind: "hibachi", x: 13 * 16, y: 8 * 16, size: 14, hp: 2, maxHp: 2, dir: "left" },
+      { id: "l-d1", kind: "doromu", x: 1 * 16, y: 6 * 16, size: 14, hp: 2, maxHp: 2, dir: "down" },
     ],
     chests: [
       {
         id: "chest-lake-heart",
-        tx: 7,
-        ty: 5,
+        tx: 1,
+        ty: 9,
         reward: "heart_container",
         message: "湖の底から『命の器』が浮かび上がった！最大ハートが1つ増えた！",
       },
@@ -369,8 +403,8 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         ty: 4,
         lines: [
           "やあリオ！この湖には昔、星のかけらの光が反射して美しかったんだ。",
-          "中央の宝箱は湖の精が守っていた命の器だ。",
-          "北に見えるのが翠光の塔だが……今は封印されて入れない。",
+          "湖の中央の宝箱は、湖の精が守っていた命の器だ。",
+          "北の翠光の塔は、今は封印されて入れない。",
         ],
       },
       {
@@ -381,8 +415,18 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         ty: 4,
         lines: [
           "星影の湖 —— 翠光の塔への道",
-          "塔に入るには、ゴルダを倒し3つのかけらを揃える必要がある。",
+          "塔の封印は、星のかけらを集め、島の全ての場所を巡り終えた者にのみ開く。",
+          "そして星のかけらの共鳴が翠光を満たすには、一時間の刻が必要だという。",
         ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-lake",
+        tx: 13,
+        ty: 8,
+        title: "湖底の石板",
+        text: "湖は塔の影を映す。影の中にこそ、光の道は隠れているのだ。",
       },
     ],
   },
@@ -397,7 +441,7 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
       "#fffff...fffff#",
       "#fffffffffffff#",
       "#fffff...fffff#",
-      "#f#fffGGGfff#f#",
+      "######GGG######",
       "pppppppppfffff#",
       "pppppppppfffff#",
       "######ppp######",
@@ -410,8 +454,8 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         x: 7 * 16 - 6,
         y: 3 * 16,
         size: 26,
-        hp: 10,
-        maxHp: 10,
+        hp: 14,
+        maxHp: 14,
         dir: "down",
       },
     ],
@@ -427,6 +471,15 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
           "『2つの星のかけらを携えし者のみ、翠光の門を開く』",
           "門の奥に古の番人ゴルダが待つ。",
         ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-shrine",
+        tx: 13,
+        ty: 5,
+        title: "翠光の神殿の碑文",
+        text: "番人は門の内に立つ。影に抗い続けた心を、我らは忘れぬ。",
       },
     ],
   },
@@ -456,12 +509,25 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         role: "astrologer",
         tx: 7,
         ty: 3,
+        ritual: true,
         lines: [
           "……来たか、翠光の勇者よ。私は星読みのセツナ。",
-          "三つのかけらが揃った今、この塔で儀式を行えば翠光が復活する。",
-          "だが、その前に……ゴルダの真実を知る必要がある。神殿へ向かうがよい。",
-          "ゴルダを倒した後、ここに戻り、儀式を行うのだ。",
+          "儀式には三つのかけらが必要だ。まだ揃っていないようだな。",
         ],
+        ritualLines: [
+          "……三つのかけらが揃ったか。島の全ての場所を巡ったのだな。",
+          "ゴルダの影は祓われ、アレスの願いは今、お前の手の中にある。",
+          "さあ、翠光を取り戻そう。",
+        ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-tower",
+        tx: 13,
+        ty: 1,
+        title: "翠光の塔の伝承",
+        text: "三つの欠片は、ひとつの心から生まれる。光を信じる者の手で、塔は目を覚ます。",
       },
     ],
   },
@@ -473,15 +539,15 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
       "R..ssss..ss..sR",
       "Rs.RR.ss.RR.s.R",
       "Rss.....s.....R",
-      "ppppsss.ss.s..R",
-      "p..bb...s..b..R",
+      "ppppsss.ss.s..p",
+      "p..bb...s..b..p",
       "R..s..RRR..s..R",
       "Rs.....s....s.R",
       "R.bs..b....ss.R",
       "R..sss.....s..R",
       "RRRRRRRpppRRRRR",
     ],
-    exits: { left: "forest", up: "volcano" },
+    exits: { left: "forest", up: "volcano", right: "tomb" },
     enemies: [
       {
         id: "d-k1",
@@ -535,7 +601,7 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
             when: "noteFound",
             lines: [
               "その手記を見つけたのかい。アレスは、火山の奥で何かを封じたらしい。",
-              "北の語り部ホムラに会えば、もっと詳しく聞けるはずだ。",
+              "東の果てには、古い墓所もあると聞く。そこにも何か手がかりがあるかもしれん。",
             ],
           },
           {
@@ -543,6 +609,15 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
             lines: ["風のブーツ、ちゃんと使ってるかい？ 砂嵐の中でも転がれば無事で済むさ。"],
           },
         ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-desert",
+        tx: 1,
+        ty: 9,
+        title: "砂に刻まれた旅人の歌",
+        text: "砂は昼に焼かれ、夜に凍る。それでも旅人は、星を頼りに北へ歩く。",
       },
     ],
   },
@@ -643,8 +718,151 @@ const BLUEPRINTS: Record<RoomId, RoomBlueprint> = {
         ],
       },
     ],
+    tablets: [
+      {
+        id: "tab-volcano",
+        tx: 13,
+        ty: 1,
+        title: "アレスの火山の石板",
+        text: "我が息子リオへ。この火の底で影を封じる。お前が強くなった時、必ず光を。――アレス",
+      },
+    ],
+  },
+  marsh: {
+    id: "marsh",
+    name: "霧の湿地",
+    grid: [
+      "TTTTTTpppTTTTTT",
+      "T,..~ppp~..,.bT",
+      "T.b.~ppp~.bb..T",
+      "T~~~=ppp=~~.,.T",
+      "T.,..ppppp.,..T",
+      "T~~.~ppp~~~~..T",
+      "T..b.ppp.bb.,.T",
+      "T.~~.ppp.~~..bT",
+      "T.,..ppp..,.~~T",
+      "T..bb.ppp.bb..T",
+      "TTTTTTTTTTTTTTT",
+    ],
+    exits: { up: "forest" },
+    enemies: [
+      { id: "m-d1", kind: "doromu", x: 3 * 16, y: 2 * 16, size: 14, hp: 2, maxHp: 2, dir: "right" },
+      { id: "m-d2", kind: "doromu", x: 13 * 16, y: 4 * 16, size: 14, hp: 2, maxHp: 2, dir: "left" },
+      { id: "m-k1", kind: "kagebito", x: 1 * 16, y: 9 * 16, size: 14, hp: 3, maxHp: 3, dir: "up" },
+      { id: "m-t1", kind: "togemushi", x: 11 * 16, y: 4 * 16, size: 14, hp: 3, maxHp: 3, dir: "down" },
+    ],
+    chests: [
+      {
+        id: "chest-marsh-left",
+        tx: 1,
+        ty: 6,
+        reward: "coins",
+        message: "霧に沈んだ木箱を開けると、20星貨が出てきた！",
+      },
+      {
+        id: "chest-marsh-right",
+        tx: 13,
+        ty: 6,
+        reward: "coins",
+        message: "湿地の奥で、古びた星貨の袋を見つけた！20星貨を手に入れた！",
+      },
+    ],
+    npcs: [
+      {
+        id: "marsh-ferry",
+        name: "霧の渡し守ユイ",
+        role: "spirit",
+        tx: 7,
+        ty: 8,
+        lines: [
+          "……あら、人がここへ来るなんて珍しい。霧は、迷う者の心に寄ってくるの。",
+          "この湿地の石板は、霧が晴れた時にだけ光るわ。よく探してみて。",
+          "昔、金色の髪の剣士さんが、ここで道を尋ねていったわ。確か、リオ……あなたに少し似ていたかも。",
+        ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-marsh",
+        tx: 13,
+        ty: 3,
+        title: "霧の湿地の石板",
+        text: "霧の中で迷う者は、己の影を見失う。影を取り戻したとき、道は開かれる。",
+      },
+    ],
+  },
+  tomb: {
+    id: "tomb",
+    name: "古の墓所",
+    grid: [
+      "RRRRRRRRRRRRRRR",
+      "RfffffffffffffR",
+      "RRRRRRRXRRRRRRR",
+      "RfffffffffffffR",
+      "pffRfRfffRfRffR",
+      "pfffffffffffffR",
+      "RffRfffRfffRffR",
+      "RfffffffffffffR",
+      "RffsffffffffsfR",
+      "RfffffffffffffR",
+      "RRRRRRRRRRRRRRR",
+    ],
+    exits: { left: "desert" },
+    enemies: [
+      { id: "t-k1", kind: "kagebito", x: 3 * 16, y: 7 * 16, size: 14, hp: 3, maxHp: 3, dir: "right" },
+      { id: "t-d1", kind: "doromu", x: 11 * 16, y: 8 * 16, size: 14, hp: 2, maxHp: 2, dir: "left" },
+      { id: "t-k2", kind: "kagebito", x: 12 * 16, y: 3 * 16, size: 14, hp: 3, maxHp: 3, dir: "down" },
+    ],
+    chests: [
+      {
+        id: "chest-tomb-heart",
+        tx: 11,
+        ty: 1,
+        reward: "heart_container",
+        message:
+          "崩れた石壁の奥に隠された『命の器』を見つけた！ 最大ハートが増え、全回復した！",
+      },
+    ],
+    npcs: [
+      {
+        id: "tomb-grave",
+        name: "アレスの墓碑",
+        role: "sign",
+        tx: 7,
+        ty: 5,
+        lines: [
+          "――翠光を守り、影に還った勇者アレスの墓。",
+          "墓碑の足元には、古びた木の人形がひとつ供えられている。",
+          "胸元に刻まれた字は、幼い子供の字で『パパへ』と読める。",
+        ],
+      },
+    ],
+    tablets: [
+      {
+        id: "tab-tomb",
+        tx: 2,
+        ty: 1,
+        title: "アレスの遺言",
+        text: "剣は鞘に納まり、光は導きとなる。リオよ、迷わず前へ進め。――アレス",
+      },
+    ],
   },
 };
+
+/** Every area in the order it appears in the travel journal. */
+export const ROOM_ORDER: RoomId[] = [
+  "village",
+  "forest",
+  "marsh",
+  "ruins",
+  "shrine",
+  "desert",
+  "tomb",
+  "volcano",
+  "cave",
+  "lake",
+  "tower",
+];
 
 export function createInitialRooms(): Record<RoomId, RoomRuntime> {
   const entries = Object.values(BLUEPRINTS).map((bp) => {
@@ -665,6 +883,7 @@ export function createInitialRooms(): Record<RoomId, RoomRuntime> {
       chests: bp.chests.map((c) => ({ ...c, opened: false })),
       npcs: bp.npcs.map((n) => ({ ...n, lines: [...n.lines] })),
       drops: [],
+      tablets: bp.tablets.map((t) => ({ ...t, found: false })),
     };
     return [bp.id, room] as const;
   });

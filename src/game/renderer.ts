@@ -1,5 +1,13 @@
 import { CANVAS_HEIGHT, CANVAS_WIDTH, MAP_COLS, MAP_ROWS, TILE_SIZE } from "./maps";
-import { drawChest, drawDrop, drawEnemy, drawNpc, drawRio, drawTile } from "./sprites";
+import {
+  drawChest,
+  drawDrop,
+  drawEnemy,
+  drawNpc,
+  drawRio,
+  drawTablet,
+  drawTile,
+} from "./sprites";
 import type { GameState } from "./types";
 
 export function renderGame(ctx: CanvasRenderingContext2D, state: GameState) {
@@ -49,6 +57,11 @@ export function renderGame(ctx: CanvasRenderingContext2D, state: GameState) {
   // 3. NPCs & Signs
   for (const npc of room.npcs) {
     drawNpc(ctx, npc, state.time);
+  }
+
+  // 3b. Lore stones
+  for (const tablet of room.tablets) {
+    drawTablet(ctx, tablet.tx * TILE_SIZE, tablet.ty * TILE_SIZE, state.time, tablet.found);
   }
 
   // 4. Drops

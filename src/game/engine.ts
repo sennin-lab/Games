@@ -3,6 +3,7 @@ import {
   CANVAS_WIDTH,
   MAP_COLS,
   MAP_ROWS,
+  ROOM_ORDER,
   TILE_SIZE,
   createInitialRooms,
   isSolidTile,
@@ -17,6 +18,7 @@ import type {
   InputState,
   NpcState,
   RoomId,
+  RoomRuntime,
 } from "./types";
 import { OPENING_STORY, ROOM_STORY_EVENTS, buildEndingStory } from "./types";
 
@@ -28,6 +30,12 @@ const BOW_COOLDOWN = 0.45;
 const ARROW_SPEED = 220;
 const ARROW_LIFE = 1.0;
 const PLAYER_HITBOX = { ox: 3, oy: 6, w: 10, h: 9 };
+
+/**
+ * Real play time before the final tower opens. The star shards need one full hour
+ * to resonate and fill the Emerald Light, so the last area cannot be reached sooner.
+ */
+export const RESONANCE_SECONDS = 60 * 60;
 
 /** Message shown when an NPC teaches Rio an ability. */
 export const ABILITY_NOTES: Record<AbilityId, string> = {
@@ -68,6 +76,10 @@ export function createInitialState(phase: GamePhase = "title"): GameState {
     shrineUnlocked: false,
     bossDefeated: false,
     bossTalked: false,
+    playSeconds: 0,
+    towerUnlocked: false,
+    journalOpen: false,
+    pendingEnding: false,
     time: 0,
     nextEntityId: 1,
     intro:
@@ -87,7 +99,12 @@ export function startIntro(state: GameState, playSfx?: SoundCallback) {
 
 function startEnding(state: GameState, playSfx?: SoundCallback) {
   state.phase = "ending";
-  state.intro = { story: buildEndingStory(state.flags), panelIndex: 0, lineIndex: 0, fade: 0 };
+  state.intro = {
+    story: buildEndingStory(state.flags, isTrueEnding(state)),
+    panelIndex: 0,
+    lineIndex: 0,
+    fade: 0,
+  };
   playSfx?.("unlock");
 }
 
@@ -232,7 +249,7 @@ function breakCrack(state: GameState, tx: number, ty: number, playSfx?: SoundCal
 }
 
 export function startAttack(state: GameState, playSfx?: SoundCallback) {
-  if (state.phase !== "playing") return;
+  if (state.phase !== "playing" || state.journalOpen) return;
   if (state.dialogue) {
     advanceDialogue(state, playSfx);
     return;
@@ -295,7 +312,7 @@ export function startAttack(state: GameState, playSfx?: SoundCallback) {
 
 /** Dodge roll with the wind boots: short burst in the facing direction, briefly invulnerable. */
 export function startRoll(state: GameState, playSfx?: SoundCallback) {
-  if (state.phase !== "playing" || state.dialogue) return;
+  if (state.phase !== "playing" || state.dialogue || state.journalOpen) return;
   if (!state.abilities.roll) return;
   const p = state.player;
   if (p.rollCooldown > 0 || p.rollTimer > 0) return;
@@ -312,7 +329,7 @@ export function startRoll(state: GameState, playSfx?: SoundCallback) {
 
 /** Fires a star arrow in the facing direction. Arrows break cracked rock. */
 export function startShoot(state: GameState, playSfx?: SoundCallback) {
-  if (state.phase !== "playing" || state.dialogue) return;
+  if (state.phase !== "playing" || state.dialogue || state.journalOpen) return;
   if (!state.abilities.bow) return;
   const p = state.player;
   if (p.bowCooldown > 0 || p.rollTimer > 0) return;
@@ -387,12 +404,12 @@ export function damageEnemy(
       state.bossDefeated = true;
       room.drops.push({
         id: `drop-${state.nextEntityId++}`,
-        kind: "shard",
+        kind: "heart",
         x: enemy.x + 6,
         y: enemy.y + 6,
         bobPhase: 0,
       });
-      state.banner = { text: "古の番人ゴルダを倒した！星のかけらを取ろう！", timer: 3.5 };
+      state.banner = { text: "古の番人ゴルダを倒した！ 島の残りの場所を巡ろう", timer: 3.5 };
       playSfx?.("unlock");
     } else {
       const dropKind = state.player.hp < state.player.maxHp ? "heart" : "coin";
@@ -414,6 +431,10 @@ export function advanceDialogue(state: GameState, playSfx?: SoundCallback) {
     playSfx?.("talk");
   } else {
     state.dialogue = null;
+    if (state.pendingEnding) {
+      state.pendingEnding = false;
+      startEnding(state, playSfx);
+    }
   }
 }
 
@@ -424,7 +445,7 @@ export function linesFor(npc: NpcState, flags: GameState["flags"]): string[] {
 }
 
 export function interact(state: GameState, playSfx?: SoundCallback) {
-  if (state.phase !== "playing") return;
+  if (state.phase !== "playing" || state.journalOpen) return;
   if (state.dialogue) {
     advanceDialogue(state, playSfx);
     return;
@@ -460,7 +481,7 @@ export function interact(state: GameState, playSfx?: SoundCallback) {
   // Check NPCs & signs
   for (const npc of room.npcs) {
     if (rectsOverlap(box.x, box.y, box.w, box.h, npc.tx * TILE_SIZE, npc.ty * TILE_SIZE, 16, 16)) {
-      const lines = [...linesFor(npc, state.flags)];
+      let lines = [...linesFor(npc, state.flags)];
       if (npc.grants && !state.abilities[npc.grants]) {
         state.abilities[npc.grants] = true;
         lines.push(ABILITY_NOTES[npc.grants]);
@@ -468,6 +489,15 @@ export function interact(state: GameState, playSfx?: SoundCallback) {
         playSfx?.("unlock");
       }
       npc.sets?.forEach((flag) => setFlag(state, flag));
+      setFlag(state, `talk:${npc.id}`);
+      if (npc.ritual) {
+        if (state.player.shards >= 3) {
+          lines = [...(npc.ritualLines ?? lines)];
+          state.pendingEnding = true;
+        } else {
+          lines = [...lines, "（三つのかけらを携えてから、もう一度来るがよい。）"];
+        }
+      }
       state.dialogue = { speaker: npc.name, lines, index: 0 };
       playSfx?.("talk");
       return;
@@ -504,6 +534,7 @@ function transitionRoom(state: GameState, dir: Direction) {
   const current = state.rooms[state.roomId];
   const nextId: RoomId | undefined = current.exits[dir];
   if (!nextId) return;
+  if (nextId === "tower" && !state.towerUnlocked) return;
   state.roomId = nextId;
   state.particles = [];
   state.arrows = [];
@@ -524,25 +555,40 @@ function transitionRoom(state: GameState, dir: Direction) {
 }
 
 /**
- * What Rio should do next. The main goal follows the boss and shard progress;
- * the side goal points at the next optional story beat.
+ * What Rio should do next. The main goal follows the route: shards and the shrine,
+ * then every other area, then the resonance hour, then the tower.
  */
 export function getObjectives(state: GameState): { main: string; side: string | null } {
   const shards = state.player.shards;
+  const { cleared, total } = clearProgress(state);
   let main: string;
-  if (state.bossDefeated) {
-    main = shards >= 3 ? "翠光の塔で儀式を行い、光を取り戻す" : "ゴルダが残した星のかけらを拾う";
-  } else if (state.shrineUnlocked) {
-    main = "翠光の神殿で番人ゴルダを倒す";
-  } else {
+  if (state.towerUnlocked) {
+    main =
+      shards >= 3
+        ? "翠光の塔へ行き、星読みのセツナと儀式を行う"
+        : `翠光の塔へ行く（星のかけらはあと${3 - shards}つ）`;
+  } else if (!state.shrineUnlocked) {
     main = `星のかけらを2つ集めて神殿の封印を解く（${Math.min(shards, 2)}/2）`;
+  } else if (!state.bossDefeated) {
+    main = "翠光の神殿で番人ゴルダを倒す";
+  } else if (cleared < total) {
+    main = `島の残りの場所をすべて巡りクリアする（${cleared}/${total}）`;
+  } else {
+    main = `翠光が満ちるまで あと${formatClock(RESONANCE_SECONDS - state.playSeconds)}`;
   }
 
-  let side: string | null = null;
-  if (!state.flags["metNagi"]) side = "（寄り道）砂風の砂漠の旅商人ナギに話を聞く";
-  else if (!state.flags["metHomura"]) side = "（寄り道）火山の語り部ホムラに会う";
-  else if (!state.flags["pocketFound"]) side = "（寄り道）火山のひび割れを星の矢で砕く";
+  const { found, total: tabletTotal } = tabletCount(state);
+  const side =
+    found < tabletTotal ? `（探索）石板を探す ${found}/${tabletTotal}　[M] 旅の記録` : null;
   return { main, side };
+}
+
+/** mm:ss for the HUD countdown; never negative. */
+export function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.ceil(seconds));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
 export function stepGame(state: GameState, input: InputState, dt: number, playSfx?: SoundCallback) {
@@ -577,7 +623,10 @@ export function stepGame(state: GameState, input: InputState, dt: number, playSf
     });
     return;
   }
-  if (state.phase !== "playing" || state.dialogue) return;
+  if (state.phase !== "playing" || state.journalOpen) return;
+  state.playSeconds += clampedDt;
+  unlockTowerIfReady(state, playSfx);
+  if (state.dialogue) return;
 
   const p = state.player;
   p.attackTimer = Math.max(0, p.attackTimer - clampedDt);
@@ -796,24 +845,37 @@ export function stepGame(state: GameState, input: InputState, dt: number, playSf
       } else {
         p.shards += 1;
         spawnBurst(state, p.x + 8, p.y + 8, "#52e5b2", 16);
-        if (p.shards >= 3) {
-          // Boss defeated with 3 shards — go to ending
-          if (state.bossDefeated) {
-            state.roomId = "tower";
-            startEnding(state, playSfx);
-          } else {
-            unlockShrineIfReady(state, playSfx);
-            playSfx?.("chest");
-          }
-        } else {
-          unlockShrineIfReady(state, playSfx);
-          playSfx?.("chest");
-        }
+        unlockShrineIfReady(state, playSfx);
+        playSfx?.("chest");
       }
       return false;
     }
     return true;
   });
+
+  // Lore stones: walking over one reads it and records it in the journal.
+  for (const tablet of currentRoom.tablets) {
+    if (tablet.found) continue;
+    if (
+      rectsOverlap(
+        p.x + 2,
+        p.y + 2,
+        12,
+        12,
+        tablet.tx * TILE_SIZE + 3,
+        tablet.ty * TILE_SIZE + 3,
+        10,
+        10,
+      )
+    ) {
+      tablet.found = true;
+      setFlag(state, `tablet:${tablet.id}`);
+      spawnBurst(state, tablet.tx * TILE_SIZE + 8, tablet.ty * TILE_SIZE + 8, "#ffe9a8", 14);
+      state.dialogue = { speaker: `石板「${tablet.title}」`, lines: [tablet.text], index: 0 };
+      playSfx?.("unlock");
+      break;
+    }
+  }
 
   // Update particles
   state.particles = state.particles.filter((pt) => {
@@ -821,5 +883,131 @@ export function stepGame(state: GameState, input: InputState, dt: number, playSf
     pt.y += pt.vy * clampedDt;
     pt.life -= clampedDt;
     return pt.life > 0;
+  });
+}
+
+/** A room is cleared when its enemies are gone, its chests opened, and everyone there spoken to. */
+export function isRoomCleared(room: RoomRuntime, flags: GameState["flags"]): boolean {
+  return (
+    room.enemies.every((e) => !e.alive) &&
+    room.chests.every((c) => c.opened) &&
+    room.npcs.every((n) => flags[`talk:${n.id}`])
+  );
+}
+
+/** Progress over every area except the final tower. */
+export function clearProgress(state: GameState): { cleared: number; total: number } {
+  const areas = ROOM_ORDER.filter((id) => id !== "tower");
+  const cleared = areas.filter((id) => isRoomCleared(state.rooms[id], state.flags)).length;
+  return { cleared, total: areas.length };
+}
+
+export function tabletCount(state: GameState): { found: number; total: number } {
+  let found = 0;
+  let total = 0;
+  for (const id of ROOM_ORDER) {
+    for (const t of state.rooms[id].tablets) {
+      total += 1;
+      if (t.found) found += 1;
+    }
+  }
+  return { found, total };
+}
+
+/** The true ending needs every lore stone in the world. */
+export function isTrueEnding(state: GameState): boolean {
+  const { found, total } = tabletCount(state);
+  return total > 0 && found === total;
+}
+
+/** Exploration score across enemies, chests, conversations and lore stones. */
+export function explorationStats(state: GameState): {
+  found: number;
+  total: number;
+  percent: number;
+} {
+  let found = 0;
+  let total = 0;
+  for (const id of ROOM_ORDER) {
+    const r = state.rooms[id];
+    total += r.enemies.length + r.chests.length + r.npcs.length + r.tablets.length;
+    found +=
+      r.enemies.filter((e) => !e.alive).length +
+      r.chests.filter((c) => c.opened).length +
+      r.npcs.filter((n) => state.flags[`talk:${n.id}`]).length +
+      r.tablets.filter((t) => t.found).length;
+  }
+  return { found, total, percent: total > 0 ? Math.floor((found / total) * 100) : 0 };
+}
+
+/** Opens the sealed gate of the lake once every area is cleared and the hour has passed. */
+export function unlockTowerIfReady(state: GameState, playSfx?: SoundCallback) {
+  if (state.towerUnlocked) return;
+  if (state.playSeconds < RESONANCE_SECONDS) return;
+  const { cleared, total } = clearProgress(state);
+  if (cleared < total) return;
+
+  state.towerUnlocked = true;
+  const lake = state.rooms.lake;
+  for (const row of lake.tiles) {
+    for (let tx = 0; tx < row.length; tx++) {
+      if (row[tx] === "gate") row[tx] = "path";
+    }
+  }
+  state.banner = { text: "翠光の塔の封印が解けた！", timer: 3.5 };
+  playSfx?.("unlock");
+}
+
+/** Opens or closes the travel journal. The world is paused while it is open. */
+export function toggleJournal(state: GameState, playSfx?: SoundCallback) {
+  if (state.phase !== "playing" || state.dialogue) return;
+  state.journalOpen = !state.journalOpen;
+  playSfx?.("talk");
+}
+
+/** Plays the rest of the opening or ending story at once. */
+export function skipStory(state: GameState) {
+  let guard = 0;
+  while (
+    state.intro &&
+    (state.phase === "intro" || state.phase === "ending") &&
+    guard++ < 500
+  ) {
+    advanceIntro(state);
+  }
+}
+
+export interface JournalRow {
+  id: RoomId;
+  name: string;
+  cleared: boolean;
+  enemies: { done: number; total: number };
+  chests: { done: number; total: number };
+  talks: { done: number; total: number };
+  stones: { done: number; total: number };
+  /** Lore the player has read in this area. */
+  readStones: { title: string; text: string }[];
+}
+
+/** Everything the travel journal shows, in exploration order. */
+export function journalRows(state: GameState): JournalRow[] {
+  return ROOM_ORDER.map((id) => {
+    const r = state.rooms[id];
+    return {
+      id,
+      name: r.name,
+      cleared: isRoomCleared(r, state.flags),
+      enemies: {
+        done: r.enemies.filter((e) => !e.alive).length,
+        total: r.enemies.length,
+      },
+      chests: { done: r.chests.filter((c) => c.opened).length, total: r.chests.length },
+      talks: {
+        done: r.npcs.filter((n) => state.flags[`talk:${n.id}`]).length,
+        total: r.npcs.length,
+      },
+      stones: { done: r.tablets.filter((t) => t.found).length, total: r.tablets.length },
+      readStones: r.tablets.filter((t) => t.found).map((t) => ({ title: t.title, text: t.text })),
+    };
   });
 }

@@ -8,12 +8,12 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "オリジナル主人公リオと4つのエリアを冒険する2D見下ろし型ドット絵アクションゲーム。",
+          "オリジナル主人公リオと11の場所を巡る2D見下ろし型ドット絵アクションゲーム。全ての場所を巡り、一時間の旅路の果てに翠光の塔へ。",
       },
       { property: "og:title", content: "翠星の旅人 リオ" },
       {
         property: "og:description",
-        content: "3つの星のかけらを集めて翠光の神殿の番人ゴルダに挑むドット絵冒険ゲーム。",
+        content: "3つの星のかけらを集め、島の全てを巡って翠光の塔を目指すドット絵冒険ゲーム。",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },

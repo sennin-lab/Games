@@ -1,14 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
-  advanceIntro,
+  RESONANCE_SECONDS,
+  clearProgress,
   createInitialState,
   damageEnemy,
   damagePlayer,
+  explorationStats,
+  advanceDialogue,
+  isTrueEnding,
+  skipStory,
   startAttack,
   stepGame,
+  toggleJournal,
   unlockShrineIfReady,
 } from "@/game/engine";
-import { MAP_COLS, MAP_ROWS, TILE_SIZE, createInitialRooms, isSolidTile } from "@/game/maps";
+import {
+  MAP_COLS,
+  MAP_ROWS,
+  ROOM_ORDER,
+  TILE_SIZE,
+  createInitialRooms,
+  isSolidTile,
+} from "@/game/maps";
 import {
   ABILITY_NOTES,
   getObjectives,
@@ -77,7 +90,7 @@ describe("翠星の旅人 リオ game rules", () => {
     expect(state.phase).toBe("gameover");
   });
 
-  it("defeating Boss Gorda drops the 3rd Star Shard and picking it up triggers victory", () => {
+  it("defeating Boss Gorda drops a heart, and the game does not end there", () => {
     const state = createInitialState("playing");
     state.roomId = "shrine";
     state.player.shards = 2;
@@ -90,21 +103,8 @@ describe("翠星の旅人 リオ game rules", () => {
     damageEnemy(state, boss, boss.hp);
     expect(boss.alive).toBe(false);
     expect(state.bossDefeated).toBe(true);
-
-    const shardDrop = state.rooms.shrine.drops.find((d) => d.kind === "shard");
-    expect(shardDrop).toBeDefined();
-    if (!shardDrop) return;
-
-    state.player.x = shardDrop.x;
-    state.player.y = shardDrop.y;
-    stepGame(state, { up: false, down: false, left: false, right: false }, 0.016);
-
-    expect(state.player.shards).toBe(3);
-    // Ending story plays first; victory screen after the last panel.
-    expect(state.phase).toBe("ending");
-    let guard = 0;
-    while (state.phase === "ending" && guard++ < 100) advanceIntro(state);
-    expect(state.phase).toBe("victory");
+    expect(state.rooms.shrine.drops.at(-1)?.kind).toBe("heart");
+    expect(state.phase).toBe("playing");
   });
 });
 
@@ -283,14 +283,10 @@ describe("skills, cracked rock and story progress", () => {
     expect(linesFor(elder, { gotBow: true })).not.toBe(elder.lines);
   });
 
-  it("adds the optional side objective until the matching story beat happens", () => {
+  it("shows the lore-stone side goal until every stone has been read", () => {
     const state = createInitialState("playing");
-    expect(getObjectives(state).side).toContain("ナギ");
-    state.flags["metNagi"] = true;
-    expect(getObjectives(state).side).toContain("ホムラ");
-    state.flags["metHomura"] = true;
-    expect(getObjectives(state).side).toContain("ひび割れ");
-    state.flags["pocketFound"] = true;
+    expect(getObjectives(state).side).toContain("石板");
+    for (const id of ROOM_ORDER) for (const t of state.rooms[id].tablets) t.found = true;
     expect(getObjectives(state).side).toBeNull();
   });
 
@@ -302,5 +298,166 @@ describe("skills, cracked rock and story progress", () => {
 
   it("gives the shrine an entry story beat with a chapter title", () => {
     expect(ROOM_STORY_EVENTS.shrine?.chapter).toContain("神殿");
+  });
+});
+
+/** Clears one area the way a player does: sword on enemies, chests and people; walk over stones. */
+function clearArea(state: GameState, id: RoomId) {
+  const room = state.rooms[id];
+  state.roomId = id;
+  for (const e of room.enemies) if (e.alive) damageEnemy(state, e, e.hp + 1);
+  for (const c of room.chests) {
+    if (c.opened) continue;
+    state.dialogue = null;
+    state.player.x = c.tx * TILE_SIZE - 14;
+    state.player.y = c.ty * TILE_SIZE + 1;
+    state.player.dir = "right";
+    interact(state);
+  }
+  for (const n of room.npcs) {
+    if (state.flags[`talk:${n.id}`]) continue;
+    state.dialogue = null;
+    state.player.x = n.tx * TILE_SIZE - 14;
+    state.player.y = n.ty * TILE_SIZE + 1;
+    state.player.dir = "right";
+    interact(state);
+  }
+  for (const tb of room.tablets) {
+    if (tb.found) continue;
+    state.dialogue = null;
+    state.player.x = tb.tx * TILE_SIZE;
+    state.player.y = tb.ty * TILE_SIZE;
+    stepGame(state, { up: false, down: false, left: false, right: false }, 0.016);
+  }
+  state.dialogue = null;
+}
+
+const IDLE = { up: false, down: false, left: false, right: false };
+
+describe("final area: clear every location and wait out the resonance hour", () => {
+  it("keeps the lake's gate shut at the start, so the tower cannot be reached", () => {
+    const state = createInitialState("playing");
+    state.roomId = "lake";
+    state.player.x = 7 * TILE_SIZE - 4;
+    state.player.y = 2 * TILE_SIZE;
+    for (let i = 0; i < 200; i++) stepGame(state, { up: true, down: false, left: false, right: false }, 0.03);
+    expect(state.roomId).toBe("lake");
+    expect(state.rooms.lake.tiles[0]?.[7]).toBe("gate");
+  });
+
+  it("does not open the tower just because every area is done, before the hour has passed", () => {
+    const state = createInitialState("playing");
+    for (const id of ROOM_ORDER) if (id !== "tower") clearArea(state, id);
+    state.player.shards = 3;
+    state.playSeconds = RESONANCE_SECONDS - 60;
+    stepGame(state, IDLE, 0.016);
+    expect(clearProgress(state).cleared).toBe(clearProgress(state).total);
+    expect(state.towerUnlocked).toBe(false);
+  });
+
+  it("does not open the tower on the hour alone while areas remain", () => {
+    const state = createInitialState("playing");
+    state.playSeconds = RESONANCE_SECONDS + 600;
+    stepGame(state, IDLE, 0.016);
+    expect(state.towerUnlocked).toBe(false);
+  });
+
+  it("opens the gate once everything is cleared and an hour has passed", () => {
+    const state = createInitialState("playing");
+    for (const id of ROOM_ORDER) if (id !== "tower") clearArea(state, id);
+    state.player.shards = 3;
+    state.playSeconds = RESONANCE_SECONDS;
+    stepGame(state, IDLE, 0.016);
+    expect(state.towerUnlocked).toBe(true);
+    expect(state.rooms.lake.tiles[0]?.[7]).toBe("path");
+  });
+
+  it("counts play time only while exploring, not on the title or in the journal", () => {
+    const title = createInitialState("title");
+    stepGame(title, IDLE, 1);
+    expect(title.playSeconds).toBe(0);
+
+    const state = createInitialState("playing");
+    toggleJournal(state);
+    expect(state.journalOpen).toBe(true);
+    stepGame(state, IDLE, 1);
+    expect(state.playSeconds).toBe(0);
+    toggleJournal(state);
+    stepGame(state, IDLE, 0.5);
+    expect(state.playSeconds).toBeGreaterThan(0);
+  });
+
+  it("starts the ending only when the keeper is spoken to with all three shards", () => {
+    const state = createInitialState("playing");
+    state.roomId = "tower";
+    state.towerUnlocked = true;
+    state.player.shards = 2;
+    const keeper = state.rooms.tower.npcs[0];
+    if (!keeper) throw new Error("keeper missing");
+    state.player.x = keeper.tx * TILE_SIZE - 14;
+    state.player.y = keeper.ty * TILE_SIZE + 1;
+    state.player.dir = "right";
+    interact(state);
+    while (state.dialogue) advanceDialogue(state);
+    expect(state.phase).toBe("playing");
+
+    state.player.shards = 3;
+    interact(state);
+    while (state.dialogue) advanceDialogue(state);
+    expect(state.phase).toBe("ending");
+    skipStory(state);
+    expect(state.phase).toBe("victory");
+  });
+
+  it("reaches the true ending only with every lore stone", () => {
+    const state = createInitialState("playing");
+    expect(isTrueEnding(state)).toBe(false);
+    for (const id of ROOM_ORDER) for (const t of state.rooms[id].tablets) t.found = true;
+    expect(isTrueEnding(state)).toBe(true);
+  });
+
+  it("raises the exploration score as areas are cleared", () => {
+    const state = createInitialState("playing");
+    const before = explorationStats(state).percent;
+    for (const id of ROOM_ORDER) if (id !== "tower") clearArea(state, id);
+    const after = explorationStats(state).percent;
+    expect(after).toBeGreaterThan(before);
+    expect(after).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("world connectivity", () => {
+  const rooms = createInitialRooms();
+  const OPPOSITE = { up: "down", down: "up", left: "right", right: "left" } as const;
+
+  it("links every exit to a matching exit on the neighbouring room", () => {
+    for (const id of ROOM_ORDER) {
+      for (const [dir, to] of Object.entries(rooms[id].exits) as [keyof typeof OPPOSITE, RoomId][]) {
+        expect(rooms[to].exits[OPPOSITE[dir]], `${id} ${dir} -> ${to}`).toBe(id);
+      }
+    }
+  });
+
+  it("reaches every area, including the tower, from the village", () => {
+    const seen = new Set<RoomId>(["village"]);
+    const queue: RoomId[] = ["village"];
+    while (queue.length) {
+      const id = queue.shift();
+      if (!id) break;
+      for (const to of Object.values(rooms[id].exits)) {
+        if (to && !seen.has(to)) {
+          seen.add(to);
+          queue.push(to);
+        }
+      }
+    }
+    expect([...seen].sort()).toEqual([...ROOM_ORDER].sort());
+  });
+
+  it("gives every room a complete 15x11 grid", () => {
+    for (const id of ROOM_ORDER) {
+      expect(rooms[id].tiles.length, id).toBe(MAP_ROWS);
+      for (const row of rooms[id].tiles) expect(row.length, id).toBe(MAP_COLS);
+    }
   });
 });

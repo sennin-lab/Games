@@ -1,7 +1,17 @@
 export type Direction = "down" | "up" | "left" | "right";
 
 export type RoomId =
-  "village" | "forest" | "ruins" | "cave" | "lake" | "shrine" | "tower" | "desert" | "volcano";
+  | "village"
+  | "forest"
+  | "ruins"
+  | "cave"
+  | "lake"
+  | "shrine"
+  | "tower"
+  | "desert"
+  | "volcano"
+  | "marsh"
+  | "tomb";
 
 export type TileType =
   | "grass"
@@ -90,6 +100,16 @@ export interface ChestState {
   sets?: string[];
 }
 
+/** Lore stone hidden in each area. Walking over it records it in the travel journal. */
+export interface TabletState {
+  id: string;
+  tx: number;
+  ty: number;
+  title: string;
+  text: string;
+  found: boolean;
+}
+
 /** Alternative dialogue used once a story flag has been set. Earlier entries win. */
 export interface NpcVariant {
   when: string;
@@ -108,6 +128,10 @@ export interface NpcState {
   sets?: string[];
   /** Ability taught on the first conversation. */
   grants?: AbilityId;
+  /** The ritual keeper: talking to them with all shards starts the ending. */
+  ritual?: boolean;
+  /** Lines spoken during the ritual when all shards are gathered. */
+  ritualLines?: string[];
 }
 
 export interface DropItem {
@@ -137,6 +161,7 @@ export interface RoomRuntime {
   chests: ChestState[];
   npcs: NpcState[];
   drops: DropItem[];
+  tablets: TabletState[];
   exits: Partial<Record<Direction, RoomId>>;
 }
 
@@ -145,6 +170,8 @@ export type GamePhase = "title" | "intro" | "playing" | "gameover" | "victory" |
 export interface StoryPanel {
   speaker: string;
   lines: string[];
+  /** Optional visual mood for the cinematic backdrop. Defaults to the scene's own mood. */
+  mood?: "night" | "dawn" | "dark";
 }
 
 export const OPENING_STORY: StoryPanel[] = [
@@ -155,6 +182,16 @@ export const OPENING_STORY: StoryPanel[] = [
       "しかし、ある夜、空から降りた黒き影が神殿の番人ゴルダを狂わせ、かけらを四方に散らした。",
       "翠光が消え、島には魔物が跋扈するようになった。",
     ],
+    mood: "night",
+  },
+  {
+    speaker: "― 十年前の夜 ―",
+    lines: [
+      "黒き影を追い、一人の剣士が北の火山へ旅立った。その名はアレス。",
+      "「必ず帰る。だからリオ、良い子で待っていてくれ」",
+      "それが、幼い息子と交わした最後の言葉だった。",
+    ],
+    mood: "dark",
   },
   {
     speaker: "― ミドリの村・森のほとり ―",
@@ -163,6 +200,7 @@ export const OPENING_STORY: StoryPanel[] = [
       "星のかけらの欠片が、彼を呼び覚ましたのだ。",
       "「……おじいさん？ この光、いったい何が起きてるの？」",
     ],
+    mood: "dawn",
   },
   {
     speaker: "長老ハル",
@@ -192,6 +230,7 @@ const ENDING_STORY_BASE: StoryPanel[] = [
   {
     speaker: "リオ",
     lines: ["……ゴルダ。あなたは本当は、かけらを守っていたんだね。"],
+    mood: "dark",
   },
   {
     speaker: "古の番人ゴルダ（最期の声）",
@@ -201,10 +240,12 @@ const ENDING_STORY_BASE: StoryPanel[] = [
       "お前の父……アレスは……我に挑み……我が暴走を……食い止め……",
       "自らの命と引き換えに……我を……封じたのだ……",
     ],
+    mood: "dark",
   },
   {
     speaker: "リオ",
     lines: ["父さんが……ゴルダを止めるために……！"],
+    mood: "dark",
   },
   {
     speaker: "ゴルダ",
@@ -214,6 +255,7 @@ const ENDING_STORY_BASE: StoryPanel[] = [
       "……その者が……お前だ……リオ……",
       "三つのかけらを……揃え……翠光を……取り戻せ……",
     ],
+    mood: "dawn",
   },
   {
     speaker: "リオ",
@@ -221,6 +263,7 @@ const ENDING_STORY_BASE: StoryPanel[] = [
       "……うん。父さんの意思を、僕が引き継ぐ。",
       "三つのかけらを、翠光の塔に返せば、きっと……！",
     ],
+    mood: "dawn",
   },
   {
     speaker: "",
@@ -229,6 +272,7 @@ const ENDING_STORY_BASE: StoryPanel[] = [
       "塔の頂でかけらが共鳴し、失われた翠光が再び島に降り注ぐ。",
       "エルディア諸島に、十年ぶりの光が戻った。",
     ],
+    mood: "dawn",
   },
   {
     speaker: "― エピローグ ―",
@@ -238,6 +282,25 @@ const ENDING_STORY_BASE: StoryPanel[] = [
       "「父さん、ありがとう。僕はまた旅に出るよ。この光がある限り」",
       "  ― 翠星の旅人、リオの物語は終わらない ―",
     ],
+    mood: "dawn",
+  },
+];
+
+/** Extra beat when Rio has read every lore stone. */
+const TRUE_ENDING_PANELS: StoryPanel[] = [
+  {
+    speaker: "― 十一の石板 ―",
+    lines: [
+      "島じゅうの石板を読み終えたリオの胸に、父の言葉が静かに響いた。",
+      "「影を封じたのは、誰かを救いたいと願ったからだ。お前も、同じ心で生きてくれ」",
+      "父は最後まで、息子の未来を信じていたのだ。",
+    ],
+    mood: "dawn",
+  },
+  {
+    speaker: "リオ",
+    lines: ["……父さん。僕は、もう迷わない。"],
+    mood: "dawn",
   },
 ];
 
@@ -260,11 +323,19 @@ export interface GameState {
   bossDefeated: boolean;
   bossTalked: boolean;
   time: number;
+  /** Real play time in seconds (only counted while exploring). Gates the final area. */
+  playSeconds: number;
+  /** True once every other area is cleared and the resonance hour has passed. */
+  towerUnlocked: boolean;
+  /** Travel journal overlay is open; the world is paused while it is. */
+  journalOpen: boolean;
+  /** Set when the ritual dialogue ends; the ending then begins. */
+  pendingEnding: boolean;
   nextEntityId: number;
   intro: { story: StoryPanel[]; panelIndex: number; lineIndex: number; fade: number } | null;
   /** Rooms whose first-entry story event has already played. */
   seenRooms: Partial<Record<RoomId, true>>;
-  /** Story progress flags (metNagi, gotBow, sheathFound, ...). */
+  /** Story progress flags (metNagi, gotBow, talk:<npc>, tablet:<id>, ...). */
   flags: Partial<Record<string, true>>;
   abilities: Partial<Record<AbilityId, true>>;
   arrows: Arrow[];
@@ -304,29 +375,62 @@ export const ROOM_STORY_EVENTS: Partial<Record<RoomId, RoomStoryEvent>> = {
       "この火山の奥で、父さんは最後の戦いをしたんだ。",
     ],
   },
+  marsh: {
+    chapter: "幕間 霧の湿地",
+    speaker: "リオ",
+    lines: [
+      "一面の霧……。どちらが北かも分からなくなりそうだ。",
+      "霧の向こうから、誰かが歌うような声が聞こえる……？",
+    ],
+  },
+  tomb: {
+    chapter: "第五章 古の墓所",
+    speaker: "リオ",
+    lines: [
+      "ここが、父さんの眠る墓所……？ 誰が、こんな遠い場所に墓を建てたんだろう。",
+      "石壁の一部が、ひび割れている。奥に何かが隠されているのかもしれない。",
+    ],
+  },
+  tower: {
+    chapter: "終章 翠光の塔",
+    speaker: "リオ",
+    lines: [
+      "ついに、ここまで来た……。島じゅうの記憶が、この塔に集まっている。",
+      "三つのかけらが、共鳴を求めて震えている。",
+    ],
+  },
 };
 
 /**
  * Ending text with a few extra beats depending on what Rio found on the way.
  * Story flags are set by NPCs, chests and room events.
  */
-export function buildEndingStory(flags: Partial<Record<string, true>>): StoryPanel[] {
+export function buildEndingStory(
+  flags: Partial<Record<string, true>>,
+  trueEnding = false,
+): StoryPanel[] {
   const panels = ENDING_STORY_BASE.map((p) => ({ ...p, lines: [...p.lines] }));
   const extra: StoryPanel[] = [];
   if (flags["sheathFound"]) {
     extra.push({
       speaker: "リオ",
       lines: ["……父さんの剣の鞘。ずっと、僕がここへ来るのを待っていてくれたんだね。"],
+      mood: "dawn",
     });
   }
   if (flags["gotBow"]) {
     extra.push({
       speaker: "リオ",
       lines: ["翠光の弓が、かけらと共鳴している……。影を射抜いたのは、この光だ。"],
+      mood: "dawn",
     });
   }
   // Insert right after Gorda's last voice (index 1), before Rio's reply.
   if (extra.length > 0) panels.splice(2, 0, ...extra);
+  if (trueEnding) {
+    // Just before the epilogue: the father's words from every stone.
+    panels.splice(panels.length - 1, 0, ...TRUE_ENDING_PANELS.map((p) => ({ ...p, lines: [...p.lines] })));
+  }
   return panels;
 }
 

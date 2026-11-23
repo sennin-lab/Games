@@ -395,3 +395,28 @@ export function drawEnemy(
     px(ctx, x + 12, y + 14 + breathe, 2, 2, "#e8fff7");
   }
 }
+
+/** Lore stone: a small carved slab. Unread stones sparkle so explorers can spot them. */
+export function drawTablet(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  time: number,
+  found: boolean,
+) {
+  const stone = found ? "#5d6070" : "#9aa0b0";
+  const carve = found ? "#3b3e4d" : "#6b7184";
+  px(ctx, x + 4, y + 4, 8, 10, stone);
+  px(ctx, x + 5, y + 3, 6, 1, stone);
+  px(ctx, x + 6, y + 6, 4, 1, carve);
+  px(ctx, x + 6, y + 8, 4, 1, carve);
+  px(ctx, x + 6, y + 10, 2, 1, carve);
+  if (!found) {
+    const phase = Math.floor(time * 4 + x * 0.05) % 4;
+    const sparkle = "#fff3b0";
+    if (phase === 0) px(ctx, x + 2, y + 2, 1, 1, sparkle);
+    if (phase === 1) px(ctx, x + 13, y + 5, 1, 1, sparkle);
+    if (phase === 2) px(ctx, x + 3, y + 12, 1, 1, sparkle);
+    if (phase === 3) px(ctx, x + 12, y + 1, 1, 1, sparkle);
+  }
+}
